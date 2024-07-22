@@ -9,7 +9,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import uuid
 
-
 class WebScraper:
     def __init__(self, start_url, max_pages=50, max_workers=5):
         self.start_url = start_url
@@ -115,31 +114,41 @@ class WebScraper:
         return headers
 
     def _get_main_content(self, soup):
-        for content_class in ['mw-parser-output', 'content', 'main', 'article']:
-            content = soup.find(['div', 'main', 'article'], class_=content_class)
-            if content:
-                for unwanted in content(['table', 'script', 'style', 'footer']):
-                    unwanted.decompose()
-                return self._clean_content(content.get_text(strip=True, separator=' '))
-        return self._clean_content(soup.get_text(strip=True, separator=' '))
+        main_content = ""
+        content_div = soup.find('div', {'id': 'mw-content-text'})
+        if content_div:
+            paragraphs = content_div.find_all('p')
+            for p in paragraphs:
+                main_content += p.get_text() + "\n\n"
+        return self._clean_content(main_content)
 
     def _get_sections(self, soup):
         sections = []
-        current_section = {"title": "", "content": ""}
-        for element in soup.find_all(['h2', 'p']):
-            if element.name == 'h2':
-                if current_section["content"]:
-                    sections.append(current_section)
-                current_section = {"title": element.text.strip(), "content": ""}
-            elif element.name == 'p':
-                current_section["content"] += " " + element.text.strip()
-        if current_section["content"]:
-            sections.append(current_section)
+        content_div = soup.find('div', {'id': 'mw-content-text'})
+        if content_div:
+            current_section = {"title": "", "content": ""}
+            for element in content_div.find_all(['h2', 'p']):
+                if element.name == 'h2':
+                    if current_section["content"]:
+                        sections.append(current_section)
+                    current_section = {"title": element.text.strip(), "content": ""}
+                elif element.name == 'p':
+                    current_section["content"] += element.text.strip() + "\n\n"
+            if current_section["content"]:
+                sections.append(current_section)
         return sections
 
     def _clean_content(self, content):
+        # Remove citation numbers
+        content = re.sub(r'\[\d+\]', '', content)
+        # Remove edit links
         content = re.sub(r'\[edit\]', '', content)
-        content = re.sub(r'\s+', ' ', content)
+        # Replace multiple newlines with two newlines
+        content = re.sub(r'\n{3,}', '\n\n', content)
+        # Remove any remaining HTML tags
+        content = re.sub(r'<[^>]+>', '', content)
+        # Replace multiple spaces with a single space
+        content = re.sub(r' {2,}', ' ', content)
         return content.strip()
 
     def _get_source(self, url):
@@ -157,20 +166,19 @@ class WebScraper:
     def _should_visit(self, url):
         parsed_url = urlparse(url)
         return (
-                parsed_url.netloc == self.domain and
-                url not in self.visited_urls and
-                not re.search(r'\.(jpg|jpeg|png|gif|pdf)$', parsed_url.path, re.I) and
-                not any(re.search(pattern, url, re.I) for pattern in [
-                    r'/login', r'/register', r'/sign[_-]?up', r'/account',
-                    r'/preferences', r'/settings', r'/special:', r'/user:',
-                    r'/help:', r'/file:', r'/image:', r'/media', r'upload_wizard'
-                ])
+            parsed_url.netloc == self.domain and
+            url not in self.visited_urls and
+            not re.search(r'\.(jpg|jpeg|png|gif|pdf)$', parsed_url.path, re.I) and
+            not any(re.search(pattern, url, re.I) for pattern in [
+                r'/login', r'/register', r'/sign[_-]?up', r'/account',
+                r'/preferences', r'/settings', r'/special:', r'/user:',
+                r'/help:', r'/file:', r'/image:', r'/media', r'upload_wizard'
+            ])
         )
 
     def save_data(self, filename='training_data.json'):
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(self.data, f, ensure_ascii=False, indent=4)
-
 
 # Usage
 if __name__ == "__main__":

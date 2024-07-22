@@ -1,6 +1,16 @@
 import argparse
 import torch
-from kc_llm import GPTModel, load_tokenizer, generate_text
+from kc_llm import GPTModel, load_tokenizer, get_vocab_size
+from kc_llm.generation import generate_text
+
+
+def load_model(model_path, vocab_size, device):
+    model = GPTModel(vocab_size)
+    state_dict = torch.load(model_path, map_location=device)
+    model.load_state_dict(state_dict)
+    model.to(device)
+    model.eval()
+    return model
 
 
 def main():
@@ -16,16 +26,25 @@ def main():
     print(f"Using device: {device}")
 
     tokenizer = load_tokenizer()
-    model = GPTModel.from_pretrained(args.model_path)
-    model.to(device)
-    model.eval()
+    vocab_size = get_vocab_size(tokenizer)
 
-    generated_texts = generate_text(model, tokenizer, args.prompt, args.max_length, args.num_sequences, device)
+    model = load_model(args.model_path, vocab_size, device)
 
-    print("\nGenerated Text:")
-    for i, text in enumerate(generated_texts):
-        print(f"\nSequence {i + 1}:")
-        print(text)
+    while True:
+        prompt = input("Enter a prompt (or 'quit' to exit): ")
+        if prompt.lower() == 'quit':
+            break
+
+        generated_texts = generate_text(model, tokenizer, prompt, args.max_length, args.num_sequences, device)
+
+        if generated_texts:
+            print("\nGenerated Text:")
+            for i, text in enumerate(generated_texts):
+                print(f"\nSequence {i + 1}:")
+                print(text)
+        else:
+            print("No text was generated.")
+        print("\n" + "=" * 50 + "\n")
 
 
 if __name__ == "__main__":
