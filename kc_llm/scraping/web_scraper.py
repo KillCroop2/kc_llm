@@ -167,7 +167,7 @@ class WebScraper:
                 ])
         )
 
-    def save_data(self, filename='scraped_data.json'):
+    def save_data(self, filename='training_data.json'):
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(self.data, f, ensure_ascii=False, indent=4)
 
@@ -178,4 +178,4 @@ if __name__ == "__main__":
     scraper = WebScraper(start_url, max_pages=1000, max_workers=20)
     scraper.scrape()
     scraper.save_data()
-    print(f"Scraped {len(scraper.data['documents'])} pages. Data saved to scraped_data.json")
+    print(f"Scraped {len(scraper.data['documents'])} pages. Data saved to training_data.json")

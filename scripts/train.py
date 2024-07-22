@@ -5,7 +5,7 @@ from kc_llm import GPTModel, load_data, train_model, load_tokenizer, get_vocab_s
 
 def main():
     parser = argparse.ArgumentParser(description="Train the WikiGPT model")
-    parser.add_argument("--data_file", type=str, default="scraped_data.json", help="Path to the data file")
+    parser.add_argument("--data_file", type=str, default="training_data.json", help="Path to the data file")
     parser.add_argument("--epochs", type=int, default=20, help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=6, help="Batch size for training")
     parser.add_argument("--learning_rate", type=float, default=5e-5, help="Learning rate for training")
