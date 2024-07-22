@@ -7,8 +7,7 @@ from torch.cuda.amp import autocast, GradScaler
 from transformers import get_linear_schedule_with_warmup
 
 
-def train_model(model, dataset, epochs, batch_size, learning_rate, device, use_amp=True,
-                gradient_accumulation_steps=16):
+def train_model(model, dataset, epochs, batch_size, learning_rate, device, use_amp=True, gradient_accumulation_steps=16):
     model.to(device)
     model.train()
 
