@@ -1,0 +1,7 @@
+Metadata-Version: 2.1
+Name: kc-llm
+Version: 0.1.0
+Requires-Dist: requests
+Requires-Dist: beautifulsoup4
+Requires-Dist: torch
+Requires-Dist: transformers
