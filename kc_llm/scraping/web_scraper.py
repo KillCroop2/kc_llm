@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import uuid
 
+
 class WebScraper:
     def __init__(self, start_url, max_pages=50, max_workers=5):
         self.start_url = start_url
@@ -166,19 +167,20 @@ class WebScraper:
     def _should_visit(self, url):
         parsed_url = urlparse(url)
         return (
-            parsed_url.netloc == self.domain and
-            url not in self.visited_urls and
-            not re.search(r'\.(jpg|jpeg|png|gif|pdf)$', parsed_url.path, re.I) and
-            not any(re.search(pattern, url, re.I) for pattern in [
-                r'/login', r'/register', r'/sign[_-]?up', r'/account',
-                r'/preferences', r'/settings', r'/special:', r'/user:',
-                r'/help:', r'/file:', r'/image:', r'/media', r'upload_wizard'
-            ])
+                parsed_url.netloc == self.domain and
+                url not in self.visited_urls and
+                not re.search(r'\.(jpg|jpeg|png|gif|pdf)$', parsed_url.path, re.I) and
+                not any(re.search(pattern, url, re.I) for pattern in [
+                    r'/login', r'/register', r'/sign[_-]?up', r'/account',
+                    r'/preferences', r'/settings', r'/special:', r'/user:',
+                    r'/help:', r'/file:', r'/image:', r'/media', r'upload_wizard'
+                ])
         )
 
     def save_data(self, filename='training_data.json'):
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(self.data, f, ensure_ascii=False, indent=4)
+
 
 # Usage
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from transformers import GPT2Config, GPT2LMHeadModel
 
+
 class GPTModel(nn.Module):
     def __init__(self, vocab_size, n_positions=1024, n_embd=768, n_layer=12, n_head=12):
         super(GPTModel, self).__init__()

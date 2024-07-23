@@ -25,8 +25,8 @@ def main():
 
     trained_model = train_model(model, dataset, args.epochs, args.batch_size, args.learning_rate, device)
 
-    # Save the model
-    trained_model.save_pretrained(args.output_model)
+    # Save the model's state dictionary
+    torch.save(trained_model.state_dict(), args.output_model)
     print(f"Model saved as {args.output_model}")
 
 
