@@ -1,11 +1,19 @@
 import argparse
 import torch
 import torch.multiprocessing as mp
+import os
 from kc_llm import GPTModel, load_data, train_model, load_tokenizer, get_vocab_size, load_checkpoint
 from pathlib import Path
 
 
+def setup_distributed_env():
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+
+
 def run_training(rank, world_size, args):
+    setup_distributed_env()
+
     device = torch.device(f"cuda:{rank}" if torch.cuda.is_available() else "cpu")
 
     tokenizer = load_tokenizer()
