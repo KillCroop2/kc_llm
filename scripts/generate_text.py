@@ -6,8 +6,18 @@ from kc_llm.generation import generate_text
 
 def load_model(model_path, vocab_size, device):
     model = GPTModel(vocab_size)
-    state_dict = torch.load(model_path, map_location=device)
-    model.load_state_dict(state_dict)
+    checkpoint = torch.load(model_path, map_location=device)
+
+    if 'model_state_dict' in checkpoint:
+        # The checkpoint contains a full training state
+        model.load_state_dict(checkpoint['model_state_dict'])
+    elif 'state_dict' in checkpoint:
+        # The checkpoint contains just the model state dict
+        model.load_state_dict(checkpoint['state_dict'])
+    else:
+        # Assume the checkpoint is directly the model state dict
+        model.load_state_dict(checkpoint)
+
     model.to(device)
     model.eval()
     return model
