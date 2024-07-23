@@ -20,12 +20,8 @@ def cleanup():
 
 def train_model(model, dataset, epochs, batch_size, learning_rate, device, rank, world_size, checkpoint_path,
                 use_amp=True, gradient_accumulation_steps=4):
-    if world_size > 1:
-        setup(rank, world_size)
+    # Remove the setup(rank, world_size) call from here
 
-    model.to(device)
-    if world_size > 1:
-        model = DDP(model, device_ids=[rank])
     model.train()
 
     print(f"Training on device: {device}, Rank: {rank}/{world_size}")
@@ -33,13 +29,9 @@ def train_model(model, dataset, epochs, batch_size, learning_rate, device, rank,
     print(f"Using Automatic Mixed Precision: {use_amp}")
     print(f"Gradient Accumulation Steps: {gradient_accumulation_steps}")
 
-    if world_size > 1:
-        sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank)
-        dataloader = DataLoader(dataset, batch_size=batch_size, sampler=sampler, collate_fn=collate_fn, num_workers=4,
-                                pin_memory=True)
-    else:
-        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, num_workers=4,
-                                pin_memory=True)
+    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank)
+    dataloader = DataLoader(dataset, batch_size=batch_size, sampler=sampler, collate_fn=collate_fn, num_workers=4,
+                            pin_memory=True)
 
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
 

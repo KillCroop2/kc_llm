@@ -8,6 +8,7 @@ from pathlib import Path
 import os
 import torch.distributed as dist
 
+
 def setup_distributed_env(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'
