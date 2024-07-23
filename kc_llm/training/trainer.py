@@ -43,8 +43,7 @@ def train_model(model, dataset, epochs, batch_size, learning_rate, device, rank,
     best_eval_loss = float('inf')
 
     for epoch in range(epochs):
-        if world_size > 1:
-            sampler.set_epoch(epoch)
+        sampler.set_epoch(epoch)
         total_loss = 0
         model.train()
 
@@ -87,23 +86,20 @@ def train_model(model, dataset, epochs, batch_size, learning_rate, device, rank,
                 save_checkpoint(model, optimizer, scheduler, epoch, eval_loss, checkpoint_path)
                 print(f"New best model saved with eval loss: {eval_loss:.4f}")
 
+    # Synchronize all processes after each epoch
     if world_size > 1:
-        cleanup()
+        dist.barrier()
 
     return model
 
 
 def evaluate_model(model, dataset, batch_size, device, rank, world_size):
     model.eval()
-    if world_size > 1:
-        sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank)
-        dataloader = DataLoader(dataset, batch_size=batch_size, sampler=sampler, collate_fn=collate_fn, num_workers=4,
-                                pin_memory=True)
-    else:
-        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=4,
-                                pin_memory=True)
+    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=False)
+    dataloader = DataLoader(dataset, batch_size=batch_size, sampler=sampler, collate_fn=collate_fn, num_workers=4, pin_memory=True)
 
     total_loss = 0
+    total_samples = 0
 
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Evaluating", disable=(rank != 0)):
@@ -113,17 +109,24 @@ def evaluate_model(model, dataset, batch_size, device, rank, world_size):
             with autocast(enabled=True):
                 outputs = model(input_ids, attention_mask=attention_mask, labels=input_ids)
             loss = outputs.loss
-            total_loss += loss.item()
+            total_loss += loss.item() * input_ids.size(0)
+            total_samples += input_ids.size(0)
 
+    # Gather losses and sample counts from all processes
     if world_size > 1:
-        # Gather losses from all processes
-        losses = [torch.zeros_like(torch.tensor(total_loss)).to(device) for _ in range(world_size)]
-        dist.all_gather(losses, torch.tensor(total_loss).to(device))
-        total_loss = sum(losses).item()
+        total_loss_tensor = torch.tensor([total_loss], dtype=torch.float32, device=device)
+        total_samples_tensor = torch.tensor([total_samples], dtype=torch.int64, device=device)
 
-    avg_loss = total_loss / (len(dataloader) * world_size)
+        dist.all_reduce(total_loss_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(total_samples_tensor, op=dist.ReduceOp.SUM)
+
+        total_loss = total_loss_tensor.item()
+        total_samples = total_samples_tensor.item()
+
+    avg_loss = total_loss / total_samples
     perplexity = torch.exp(torch.tensor(avg_loss))
-    return avg_loss, perplexity
+
+    return avg_loss, perplexity.item()
 
 
 def save_checkpoint(model, optimizer, scheduler, epoch, loss, path):
