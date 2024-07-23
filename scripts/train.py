@@ -7,6 +7,7 @@ from torch.utils.data.distributed import DistributedSampler
 from kc_llm import GPTModel, load_data, load_tokenizer, get_vocab_size
 import os
 from pathlib import Path
+from tqdm import tqdm
 
 
 def setup(rank, world_size):
@@ -97,7 +98,13 @@ def train(rank, world_size, args):
         if world_size > 1:
             sampler.set_epoch(epoch)
         total_loss = 0.0
-        for batch in dataloader:
+
+        # Only show progress bar on rank 0 when using multiple GPUs
+        should_show_progress = rank == 0 or world_size == 1
+        progress_bar = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{args.epochs}",
+                            disable=not should_show_progress)
+
+        for batch in progress_bar:
             optimizer.zero_grad()
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
@@ -106,6 +113,9 @@ def train(rank, world_size, args):
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
+
+            # Update progress bar
+            progress_bar.set_postfix({'loss': loss.item()})
 
         avg_loss = total_loss / len(dataloader)
         if rank == 0 or world_size == 1:
