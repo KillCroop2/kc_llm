@@ -25,6 +25,10 @@ def run_training(rank, world_size, args):
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=0.01)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
+    # Create checkpoint directory if it doesn't exist
+    checkpoint_dir = os.path.dirname(args.checkpoint_path)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
     # Load checkpoint if it exists
     start_epoch, best_loss = load_checkpoint(model, optimizer, scheduler, args.checkpoint_path, device)
 
