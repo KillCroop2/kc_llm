@@ -9,16 +9,21 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import uuid
 
-
 class WebScraper:
     def __init__(self, start_url, max_pages=50, max_workers=5):
         self.start_url = start_url
         self.max_pages = max_pages
         self.max_workers = max_workers
         self.visited_urls = set()
-        self.data = {"dataset_version": "1.0", "documents": []}
+        self.data = {"dataset_version": "1.2", "documents": []}
         self.domain = urlparse(start_url).netloc
         self.to_visit = [start_url]
+
+    def _clean_title(self, title):
+        # Remove "- Wikipedia" and any other Wikipedia-specific prefixes
+        title = re.sub(r'\s*-\s*Wikipedia.*$', '', title)
+        title = re.sub(r'^Wikipedia:', '', title)
+        return title.strip()
 
     def scrape(self):
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
@@ -82,17 +87,20 @@ class WebScraper:
         return any(content_indicators)
 
     def _extract_data(self, soup, url):
+        title = self._clean_title(self._get_title(soup))
+        main_content = self._clean_content(self._get_main_content(soup))
+
+        # Only include articles with substantial content
+        if len(main_content.split()) < 100:
+            return None
+
         data = {
             "id": str(uuid.uuid4()),
             "url": url,
-            "title": self._get_title(soup),
+            "title": title,
             "language": self._detect_language(soup),
-            "meta_description": self._get_meta_description(soup),
-            "headers": self._get_headers(soup),
-            "main_content": self._get_main_content(soup),
-            "sections": self._get_sections(soup),
+            "main_content": main_content,
             "extracted_date": datetime.now().strftime("%Y-%m-%d"),
-            "source": self._get_source(url)
         }
         return data
 
@@ -118,10 +126,16 @@ class WebScraper:
         main_content = ""
         content_div = soup.find('div', {'id': 'mw-content-text'})
         if content_div:
-            paragraphs = content_div.find_all('p')
-            for p in paragraphs:
-                main_content += p.get_text() + "\n\n"
-        return self._clean_content(main_content)
+            paragraphs = content_div.find_all(['p', 'h2', 'h3', 'ul', 'ol'])
+            for element in paragraphs:
+                if element.name in ['h2', 'h3']:
+                    main_content += f"\n\n{element.text.strip()}\n"
+                elif element.name in ['ul', 'ol']:
+                    for li in element.find_all('li'):
+                        main_content += f"• {li.text.strip()}\n"
+                else:
+                    main_content += element.text.strip() + "\n\n"
+        return main_content
 
     def _get_sections(self, soup):
         sections = []
@@ -144,13 +158,21 @@ class WebScraper:
         content = re.sub(r'\[\d+\]', '', content)
         # Remove edit links
         content = re.sub(r'\[edit\]', '', content)
-        # Replace multiple newlines with two newlines
-        content = re.sub(r'\n{3,}', '\n\n', content)
         # Remove any remaining HTML tags
         content = re.sub(r'<[^>]+>', '', content)
         # Replace multiple spaces with a single space
         content = re.sub(r' {2,}', ' ', content)
+        # Remove lines that are likely to be Wikipedia-specific
+        content = '\n'.join([line for line in content.split('\n') if not self._is_wikipedia_specific(line)])
         return content.strip()
+
+    def _is_wikipedia_specific(self, line):
+        wikipedia_patterns = [
+            r'Wikipedia:', r'Wikimedia:', r'This article',
+            r'Citation needed', r'See also:', r'External links:',
+            r'Categories:', r'\[\[Category:', r'\[\[File:', r'\[\[Image:'
+        ]
+        return any(re.search(pattern, line) for pattern in wikipedia_patterns)
 
     def _get_source(self, url):
         parsed_url = urlparse(url)
@@ -184,7 +206,7 @@ class WebScraper:
 
 # Usage
 if __name__ == "__main__":
-    start_url = "https://en.wikipedia.org/wiki/Main_Page"  # Wikipedia main page
+    start_url = "https://en.wikipedia.org/wiki/Main_Page"
     scraper = WebScraper(start_url, max_pages=1000, max_workers=20)
     scraper.scrape()
     scraper.save_data()

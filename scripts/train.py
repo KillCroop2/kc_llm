@@ -1,141 +1,42 @@
 import argparse
 import torch
-import torch.distributed as dist
 import torch.multiprocessing as mp
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data.distributed import DistributedSampler
-from kc_llm import GPTModel, load_data, load_tokenizer, get_vocab_size
-import os
+from kc_llm import GPTModel, load_data, train_model, load_tokenizer, get_vocab_size, load_checkpoint
 from pathlib import Path
-from tqdm import tqdm
 
 
-def setup(rank, world_size):
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
-
-
-def cleanup():
-    dist.destroy_process_group()
-
-
-def save_checkpoint(model, optimizer, epoch, loss, args, is_best=False):
-    checkpoint = {
-        'epoch': epoch,
-        'model_state_dict': model.module.state_dict() if isinstance(model, DDP) else model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'loss': loss,
-    }
-    checkpoint_path = Path(args.checkpoint_dir) / f"checkpoint_epoch_{epoch}.pth"
-    torch.save(checkpoint, checkpoint_path)
-    print(f"Checkpoint saved: {checkpoint_path}")
-
-    if is_best:
-        best_model_path = Path(args.checkpoint_dir) / "best_model.pth"
-        torch.save(checkpoint, best_model_path)
-        print(f"Best model saved: {best_model_path}")
-
-
-def load_checkpoint(model, optimizer, args):
-    checkpoint_path = Path(args.checkpoint_dir) / f"checkpoint_epoch_{args.resume_epoch}.pth"
-    if not checkpoint_path.exists():
-        raise ValueError(f"No checkpoint found at {checkpoint_path}")
-
-    checkpoint = torch.load(checkpoint_path, map_location='cpu')
-    model.load_state_dict(checkpoint['model_state_dict'])
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    start_epoch = checkpoint['epoch'] + 1
-    loss = checkpoint['loss']
-    print(f"Resuming from epoch {start_epoch}, loss: {loss}")
-    return model, optimizer, start_epoch, loss
-
-
-def train(rank, world_size, args):
-    if world_size > 1:
-        setup(rank, world_size)
-
+def run_training(rank, world_size, args):
     device = torch.device(f"cuda:{rank}" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
 
     tokenizer = load_tokenizer()
     dataset = load_data(args.data_file, tokenizer, args.max_length)
 
-    if world_size > 1:
-        sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank)
-        dataloader = torch.utils.data.DataLoader(
-            dataset,
-            batch_size=args.batch_size,
-            sampler=sampler,
-            num_workers=4,
-            pin_memory=True
-        )
-    else:
-        dataloader = torch.utils.data.DataLoader(
-            dataset,
-            batch_size=args.batch_size,
-            shuffle=True,
-            num_workers=4,
-            pin_memory=True
-        )
-
     vocab_size = get_vocab_size(tokenizer)
-    model = GPTModel(vocab_size).to(device)
+    model = GPTModel(vocab_size)
 
-    if world_size > 1:
-        model = DDP(model, device_ids=[rank])
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=0.01)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
+    # Load checkpoint if it exists
+    start_epoch, best_loss = load_checkpoint(model, optimizer, scheduler, args.checkpoint_path, device)
 
-    start_epoch = 0
-    best_loss = float('inf')
+    trained_model = train_model(
+        model,
+        dataset,
+        args.epochs - start_epoch,  # Adjust epochs if resuming
+        args.batch_size,
+        args.learning_rate,
+        device,
+        rank,
+        world_size,
+        args.checkpoint_path,
+        use_amp=args.use_amp,
+        gradient_accumulation_steps=args.gradient_accumulation_steps
+    )
 
-    if args.resume_epoch is not None:
-        model, optimizer, start_epoch, best_loss = load_checkpoint(model, optimizer, args)
-
-    for epoch in range(start_epoch, args.epochs):
-        model.train()
-        if world_size > 1:
-            sampler.set_epoch(epoch)
-        total_loss = 0.0
-
-        # Only show progress bar on rank 0 when using multiple GPUs
-        should_show_progress = rank == 0 or world_size == 1
-        progress_bar = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{args.epochs}",
-                            disable=not should_show_progress)
-
-        for batch in progress_bar:
-            optimizer.zero_grad()
-            input_ids = batch['input_ids'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
-            outputs = model(input_ids, attention_mask=attention_mask, labels=input_ids)
-            loss = outputs.loss
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-
-            # Update progress bar
-            progress_bar.set_postfix({'loss': loss.item()})
-
-        avg_loss = total_loss / len(dataloader)
-        if rank == 0 or world_size == 1:
-            print(f"Epoch {epoch + 1}/{args.epochs}, Average Loss: {avg_loss:.4f}")
-
-            is_best = avg_loss < best_loss
-            best_loss = min(avg_loss, best_loss)
-
-            save_checkpoint(model, optimizer, epoch + 1, avg_loss, args, is_best)
-
-    if rank == 0 or world_size == 1:
-        final_model_path = Path(args.output_model)
-        if world_size > 1:
-            torch.save(model.module.state_dict(), final_model_path)
-        else:
-            torch.save(model.state_dict(), final_model_path)
-        print(f"Final model saved as {final_model_path}")
-
-    if world_size > 1:
-        cleanup()
+    if rank == 0:
+        # The best model is already saved in the checkpoint_path
+        print(f"Best model saved as {args.checkpoint_path}")
 
 
 def main():
@@ -145,21 +46,21 @@ def main():
     parser.add_argument("--batch_size", type=int, default=6, help="Batch size for training")
     parser.add_argument("--learning_rate", type=float, default=5e-5, help="Learning rate for training")
     parser.add_argument("--max_length", type=int, default=512, help="Maximum sequence length")
-    parser.add_argument("--output_model", type=str, default="wikigpt_model.pth", help="Path to save the trained model")
-    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints", help="Directory to save checkpoints")
-    parser.add_argument("--resume_epoch", type=int, help="Epoch to resume training from")
+    parser.add_argument("--checkpoint_path", type=str, default="best_model.pth",
+                        help="Path to save/load the best model checkpoint")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=4,
+                        help="Number of gradient accumulation steps")
+    parser.add_argument("--use_amp", action="store_true", help="Use Automatic Mixed Precision")
     args = parser.parse_args()
 
-    # Create checkpoint directory if it doesn't exist
-    Path(args.checkpoint_dir).mkdir(parents=True, exist_ok=True)
-
+    # Set up multi-GPU training
     world_size = torch.cuda.device_count()
     if world_size > 1:
         print(f"Using {world_size} GPUs!")
-        mp.spawn(train, args=(world_size, args), nprocs=world_size, join=True)
+        mp.spawn(run_training, args=(world_size, args), nprocs=world_size, join=True)
     else:
         print("No multiple GPUs found. Running on a single GPU or CPU.")
-        train(0, 1, args)
+        run_training(0, 1, args)
 
 
 if __name__ == "__main__":
