@@ -1,213 +1,180 @@
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
-import time
-import random
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import uuid
+from html import unescape
+from collections import Counter
+import nltk
+from nltk.tokenize import sent_tokenize
+from nltk.corpus import stopwords
+from tqdm import tqdm
+import time
 
 class WebScraper:
-    def __init__(self, start_url, max_pages=50, max_workers=5):
+    def __init__(self, start_url, max_pages=50, max_workers=20, timeout=30):
         self.start_url = start_url
         self.max_pages = max_pages
         self.max_workers = max_workers
+        self.timeout = timeout
         self.visited_urls = set()
-        self.data = {"dataset_version": "1.2", "documents": []}
+        self.data = {"dataset_version": "5.0", "documents": []}
         self.domain = urlparse(start_url).netloc
-        self.to_visit = [start_url]
+        self.to_visit = set([start_url])
+        self.pattern_counter = Counter()
+        self.blacklisted_patterns = set()
+        self.min_pattern_length = 20
+        self.max_pattern_length = 200
+        self.pattern_threshold = 3
+        self.max_patterns = 10000
+        self.stop_words = set(stopwords.words('english'))
+        self.session = requests.Session()
 
-    def _clean_title(self, title):
-        # Remove "- Wikipedia" and any other Wikipedia-specific prefixes
-        title = re.sub(r'\s*-\s*Wikipedia.*$', '', title)
-        title = re.sub(r'^Wikipedia:', '', title)
-        return title.strip()
+        nltk.download('punkt', quiet=True)
+        nltk.download('stopwords', quiet=True)
 
     def scrape(self):
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = set()
+            pbar = tqdm(total=self.max_pages, desc="Pages scraped")
+            
             while self.to_visit and len(self.visited_urls) < self.max_pages:
-                futures = []
-                for _ in range(min(self.max_workers, len(self.to_visit))):
-                    if self.to_visit:
-                        url = self.to_visit.pop(0)
-                        if url not in self.visited_urls:
-                            futures.append(executor.submit(self._scrape_page, url))
+                while len(futures) < self.max_workers and self.to_visit:
+                    url = self.to_visit.pop()
+                    if url not in self.visited_urls:
+                        self.visited_urls.add(url)
+                        futures.add(executor.submit(self._scrape_page, url))
 
-                for future in as_completed(futures):
+                if not futures:
+                    break
+
+                done, futures = as_completed(futures), set()
+
+                for future in done:
                     result = future.result()
                     if result:
                         self.data["documents"].append(result)
+                        self._update_patterns(result)
+                        pbar.update(1)
+
+                if len(self.visited_urls) % 100 == 0:
+                    tqdm.write(f"Pages visited: {len(self.visited_urls)}, Queue: {len(self.to_visit)}, Patterns: {len(self.pattern_counter)}")
+
+            pbar.close()
 
     def _scrape_page(self, url):
-        if url in self.visited_urls:
-            return None
-
-        print(f"Scraping: {url}")
-        self.visited_urls.add(url)
-
         try:
-            response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+            response = self.session.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=self.timeout)
             response.raise_for_status()
-            soup = BeautifulSoup(response.text, 'html.parser')
+            soup = BeautifulSoup(response.text, 'lxml')  # Using lxml parser for speed
 
             if self._is_content_page(soup, url):
                 page_data = self._extract_data(soup, url)
                 if page_data:
-                    print(f"Extracted data from: {url}")
-                    new_links = self._get_links(soup, url)
-                    self.to_visit.extend([link['href'] for link in new_links if link['href'] not in self.visited_urls])
+                    self._update_links(soup, url)
                     return page_data
-            else:
-                print(f"Skipping non-content page: {url}")
-
-        except requests.RequestException as e:
-            print(f"Error requesting {url}: {str(e)}")
         except Exception as e:
-            print(f"Error scraping {url}: {str(e)}")
-
+            tqdm.write(f"Error scraping {url}: {str(e)}")
         return None
 
     def _is_content_page(self, soup, url):
-        unwanted_patterns = [
-            r'/login', r'/register', r'/sign[_-]?up', r'/account',
-            r'/preferences', r'/settings', r'/special:', r'/user:',
-            r'/help:', r'/file:', r'/image:', r'/media', r'upload_wizard'
-        ]
-        if any(re.search(pattern, url, re.I) for pattern in unwanted_patterns):
-            return False
-
-        content_indicators = [
-            soup.find('div', {'id': 'mw-content-text'}),
-            soup.find('div', {'class': 'mw-parser-output'}),
-            soup.find('article'),
-            soup.find('main'),
-        ]
-        return any(content_indicators)
+        return bool(soup.select_one('#mw-content-text, .mw-parser-output, article, main'))
 
     def _extract_data(self, soup, url):
-        title = self._clean_title(self._get_title(soup))
-        main_content = self._clean_content(self._get_main_content(soup))
+        title = self._clean_title(soup.title.string if soup.title else '')
+        main_content = self._get_main_content(soup)
 
-        # Only include articles with substantial content
-        if len(main_content.split()) < 100:
+        if not main_content:
             return None
 
-        data = {
+        return {
             "id": str(uuid.uuid4()),
             "url": url,
             "title": title,
-            "language": self._detect_language(soup),
+            "extracted_date": datetime.now().isoformat(),
             "main_content": main_content,
-            "extracted_date": datetime.now().strftime("%Y-%m-%d"),
+            "categories": self._get_categories(soup),
         }
-        return data
 
-    def _get_title(self, soup):
-        title = soup.find('title')
-        return title.text.strip() if title else ''
+    def _clean_title(self, title):
+        return re.sub(r'\s*-\s*Wikipedia.*$', '', re.sub(r'^Wikipedia:', '', title)).strip()
 
-    def _detect_language(self, soup):
-        lang = soup.find('html').get('lang')
-        return lang[:2] if lang else 'en'
-
-    def _get_meta_description(self, soup):
-        meta = soup.find('meta', attrs={'name': 'description'})
-        return meta['content'] if meta else ''
-
-    def _get_headers(self, soup):
-        headers = {}
-        for tag in ['h1', 'h2', 'h3']:
-            headers[tag] = [h.text.strip() for h in soup.find_all(tag)]
-        return headers
+    def _get_categories(self, soup):
+        return [link.string for link in soup.select('.CategoryTreeLabel')]
 
     def _get_main_content(self, soup):
-        main_content = ""
-        content_div = soup.find('div', {'id': 'mw-content-text'})
-        if content_div:
-            paragraphs = content_div.find_all(['p', 'h2', 'h3', 'ul', 'ol'])
-            for element in paragraphs:
-                if element.name in ['h2', 'h3']:
-                    main_content += f"\n\n{element.text.strip()}\n"
-                elif element.name in ['ul', 'ol']:
-                    for li in element.find_all('li'):
-                        main_content += f"• {li.text.strip()}\n"
-                else:
-                    main_content += element.text.strip() + "\n\n"
-        return main_content
+        content_div = soup.select_one('#mw-content-text')
+        if not content_div:
+            return ""
 
-    def _get_sections(self, soup):
-        sections = []
-        content_div = soup.find('div', {'id': 'mw-content-text'})
-        if content_div:
-            current_section = {"title": "", "content": ""}
-            for element in content_div.find_all(['h2', 'p']):
-                if element.name == 'h2':
-                    if current_section["content"]:
-                        sections.append(current_section)
-                    current_section = {"title": element.text.strip(), "content": ""}
-                elif element.name == 'p':
-                    current_section["content"] += element.text.strip() + "\n\n"
-            if current_section["content"]:
-                sections.append(current_section)
-        return sections
+        paragraphs = []
+        for p in content_div.select('p'):
+            text = self._clean_content(p.get_text())
+            if len(text.split()) >= 20:  # Only include paragraphs with 20+ words
+                paragraphs.append(text)
+
+        return '\n\n'.join(paragraphs)
 
     def _clean_content(self, content):
-        # Remove citation numbers
-        content = re.sub(r'\[\d+\]', '', content)
-        # Remove edit links
-        content = re.sub(r'\[edit\]', '', content)
-        # Remove any remaining HTML tags
-        content = re.sub(r'<[^>]+>', '', content)
-        # Replace multiple spaces with a single space
+        content = re.sub(r'\[\d+\]|\[edit\]', '', content)
         content = re.sub(r' {2,}', ' ', content)
-        # Remove lines that are likely to be Wikipedia-specific
-        content = '\n'.join([line for line in content.split('\n') if not self._is_wikipedia_specific(line)])
+        content = unescape(content)
+        for pattern in self.blacklisted_patterns:
+            content = content.replace(pattern, '')
         return content.strip()
 
-    def _is_wikipedia_specific(self, line):
-        wikipedia_patterns = [
-            r'Wikipedia:', r'Wikimedia:', r'This article',
-            r'Citation needed', r'See also:', r'External links:',
-            r'Categories:', r'\[\[Category:', r'\[\[File:', r'\[\[Image:'
-        ]
-        return any(re.search(pattern, line) for pattern in wikipedia_patterns)
-
-    def _get_source(self, url):
-        parsed_url = urlparse(url)
-        return parsed_url.netloc
-
-    def _get_links(self, soup, base_url):
-        links = []
-        for a in soup.find_all('a', href=True):
+    def _update_links(self, soup, base_url):
+        for a in soup.select('a[href]'):
             href = urljoin(base_url, a['href'])
             if self._should_visit(href):
-                links.append({'text': a.text.strip(), 'href': href})
-        return links
+                self.to_visit.add(href)
 
     def _should_visit(self, url):
         parsed_url = urlparse(url)
-        return (
-                parsed_url.netloc == self.domain and
+        return (parsed_url.netloc == self.domain and
                 url not in self.visited_urls and
-                not re.search(r'\.(jpg|jpeg|png|gif|pdf)$', parsed_url.path, re.I) and
-                not any(re.search(pattern, url, re.I) for pattern in [
-                    r'/login', r'/register', r'/sign[_-]?up', r'/account',
-                    r'/preferences', r'/settings', r'/special:', r'/user:',
-                    r'/help:', r'/file:', r'/image:', r'/media', r'upload_wizard'
-                ])
-        )
+                not re.search(r'\.(jpg|jpeg|png|gif|pdf)$', parsed_url.path, re.I))
 
-    def save_data(self, filename='training_data.json'):
+    def _update_patterns(self, document):
+        content = document['main_content']
+        patterns = self._find_patterns(content)
+
+        for pattern in patterns:
+            self.pattern_counter[pattern] += 1
+            if self.pattern_counter[pattern] >= self.pattern_threshold:
+                self.blacklisted_patterns.add(pattern)
+
+        if len(self.pattern_counter) > self.max_patterns:
+            self.pattern_counter = Counter(dict(self.pattern_counter.most_common(self.max_patterns)))
+
+    def _find_patterns(self, text):
+        patterns = set()
+        sentences = sent_tokenize(text)
+        for sentence in sentences:
+            words = sentence.split()
+            for i in range(len(words)):
+                for j in range(i + 1, min(i + 10, len(words) + 1)):
+                    pattern = ' '.join(words[i:j])
+                    if self.min_pattern_length <= len(pattern) <= self.max_pattern_length:
+                        patterns.add(pattern)
+        return patterns
+
+    def save_data(self, filename='fast_extraction_training_data.json'):
         with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(self.data, f, ensure_ascii=False, indent=4)
-
+            json.dump(self.data, f, ensure_ascii=False, indent=2)
+        tqdm.write(f"Data saved to {filename}")
 
 # Usage
 if __name__ == "__main__":
+    start_time = time.time()
     start_url = "https://en.wikipedia.org/wiki/Main_Page"
-    scraper = WebScraper(start_url, max_pages=1000, max_workers=20)
+    scraper = WebScraper(start_url, max_pages=5000, max_workers=100, timeout=30)
     scraper.scrape()
     scraper.save_data()
-    print(f"Scraped {len(scraper.data['documents'])} pages. Data saved to training_data.json")
+    end_time = time.time()
+    print(f"Scraped {len(scraper.data['documents'])} pages in {end_time - start_time:.2f} seconds.")
+    print(f"Data saved to fast_extraction_training_data.json")
+    print(f"Total blacklisted patterns: {len(scraper.blacklisted_patterns)}")

@@ -1,4 +1,4 @@
-from .data_loader import load_data
-from .dataset import Dataset
+from .data_loader import load_data, EfficientDataLoader
+from .dataset import ImprovedDataset
 
-__all__ = ['load_data', 'Dataset']
+__all__ = ['load_data', 'ImprovedDataset', 'EfficientDataLoader']

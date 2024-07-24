@@ -1,12 +1,9 @@
 import torch
-import torch.optim as optim
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
-from kc_llm.data.data_loader import collate_fn
 from torch.cuda.amp import autocast, GradScaler
-from transformers import get_linear_schedule_with_warmup
 import os
 
 
@@ -18,35 +15,13 @@ def cleanup():
     dist.destroy_process_group()
 
 
-def train_model(model, dataset, epochs, batch_size, learning_rate, device, rank, world_size, checkpoint_path,
-                use_amp=True, gradient_accumulation_steps=4):
-    # Remove the setup(rank, world_size) call from here
-
+def train_model(model, dataloader, epochs, device, rank, world_size, checkpoint_path,
+                optimizer, scheduler, use_amp=True, gradient_accumulation_steps=1):
     model.train()
-
-    print(f"Training on device: {device}, Rank: {rank}/{world_size}")
-    print(f"Model is on CUDA: {next(model.parameters()).is_cuda}")
-    print(f"Using Automatic Mixed Precision: {use_amp}")
-    print(f"Gradient Accumulation Steps: {gradient_accumulation_steps}")
-
-    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank)
-    dataloader = DataLoader(dataset, batch_size=batch_size, sampler=sampler, collate_fn=collate_fn, num_workers=4,
-                            pin_memory=True)
-
-    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
-
-    num_training_steps = len(dataloader) * epochs // gradient_accumulation_steps
-    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=100, num_training_steps=num_training_steps)
-
     scaler = GradScaler(enabled=use_amp)
 
-    best_eval_loss = float('inf')
-
     for epoch in range(epochs):
-        sampler.set_epoch(epoch)
         total_loss = 0
-        model.train()
-
         progress_bar = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{epochs}", disable=(rank != 0))
 
         for i, batch in enumerate(progress_bar):
@@ -75,64 +50,15 @@ def train_model(model, dataset, epochs, batch_size, learning_rate, device, rank,
         avg_loss = total_loss / len(dataloader)
         if rank == 0:
             print(f"Epoch {epoch + 1}/{epochs}, Average Loss: {avg_loss:.4f}")
-
-            # Evaluate after each epoch
-            eval_loss, perplexity = evaluate_model(model, dataset, batch_size, device, rank, world_size)
-            print(f"Evaluation - Loss: {eval_loss:.4f}, Perplexity: {perplexity:.4f}")
-
-            # Save the best model
-            if eval_loss < best_eval_loss:
-                best_eval_loss = eval_loss
-                save_checkpoint(model, optimizer, scheduler, epoch, eval_loss, checkpoint_path)
-                print(f"New best model saved with eval loss: {eval_loss:.4f}")
-
-    # Synchronize all processes after each epoch
-    if world_size > 1:
-        dist.barrier()
+            save_checkpoint(model, optimizer, scheduler, epoch, avg_loss, checkpoint_path)
 
     return model
-
-
-def evaluate_model(model, dataset, batch_size, device, rank, world_size):
-    model.eval()
-    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=False)
-    dataloader = DataLoader(dataset, batch_size=batch_size, sampler=sampler, collate_fn=collate_fn, num_workers=4, pin_memory=True)
-
-    total_loss = 0
-    total_samples = 0
-
-    with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Evaluating", disable=(rank != 0)):
-            input_ids = batch['input_ids'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
-
-            with autocast(enabled=True):
-                outputs = model(input_ids, attention_mask=attention_mask, labels=input_ids)
-            loss = outputs.loss
-            total_loss += loss.item() * input_ids.size(0)
-            total_samples += input_ids.size(0)
-
-    # Gather losses and sample counts from all processes
-    if world_size > 1:
-        total_loss_tensor = torch.tensor([total_loss], dtype=torch.float32, device=device)
-        total_samples_tensor = torch.tensor([total_samples], dtype=torch.int64, device=device)
-
-        dist.all_reduce(total_loss_tensor, op=dist.ReduceOp.SUM)
-        dist.all_reduce(total_samples_tensor, op=dist.ReduceOp.SUM)
-
-        total_loss = total_loss_tensor.item()
-        total_samples = total_samples_tensor.item()
-
-    avg_loss = total_loss / total_samples
-    perplexity = torch.exp(torch.tensor(avg_loss))
-
-    return avg_loss, perplexity.item()
 
 
 def save_checkpoint(model, optimizer, scheduler, epoch, loss, path):
     torch.save({
         'epoch': epoch,
-        'model_state_dict': model.module.state_dict() if isinstance(model, DDP) else model.state_dict(),
+        'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
         'loss': loss,

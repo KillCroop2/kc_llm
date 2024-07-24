@@ -1,3 +1,6 @@
 /wikigpt_model.pth
 
 /.idea
+/checkpoints
+
+wiki_5000.json
