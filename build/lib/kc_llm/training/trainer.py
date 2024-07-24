@@ -6,14 +6,13 @@ from tqdm import tqdm
 from torch.cuda.amp import autocast, GradScaler
 import os
 
-
 def setup(rank, world_size):
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
-
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+    dist.init_process_group("gloo", rank=rank, world_size=world_size)
 
 def cleanup():
     dist.destroy_process_group()
-
 
 def train_model(model, dataloader, epochs, device, rank, world_size, checkpoint_path,
                 optimizer, scheduler, use_amp=True, gradient_accumulation_steps=1):
@@ -21,6 +20,9 @@ def train_model(model, dataloader, epochs, device, rank, world_size, checkpoint_
     scaler = GradScaler(enabled=use_amp)
 
     for epoch in range(epochs):
+        if isinstance(dataloader.sampler, DistributedSampler):
+            dataloader.sampler.set_epoch(epoch)
+        
         total_loss = 0
         progress_bar = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{epochs}", disable=(rank != 0))
 
@@ -54,16 +56,14 @@ def train_model(model, dataloader, epochs, device, rank, world_size, checkpoint_
 
     return model
 
-
 def save_checkpoint(model, optimizer, scheduler, epoch, loss, path):
     torch.save({
         'epoch': epoch,
-        'model_state_dict': model.state_dict(),
+        'model_state_dict': model.module.state_dict() if isinstance(model, DDP) else model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
         'loss': loss,
     }, path)
-
 
 def load_checkpoint(model, optimizer, scheduler, path, device):
     if not os.path.exists(path):

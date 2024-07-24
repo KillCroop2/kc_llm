@@ -10,7 +10,8 @@ setup(
         "beautifulsoup4",
         "torch",
         "transformers",
-        "nltk"
+        "nltk",
+        "lxml",
          # Add any other dependencies
     ],
 )

@@ -13,6 +13,7 @@ from nltk.tokenize import sent_tokenize
 from nltk.corpus import stopwords
 from tqdm import tqdm
 import time
+import hashlib
 
 class WebScraper:
     def __init__(self, start_url, max_pages=50, max_workers=20, timeout=30):
@@ -21,7 +22,7 @@ class WebScraper:
         self.max_workers = max_workers
         self.timeout = timeout
         self.visited_urls = set()
-        self.data = {"dataset_version": "5.0", "documents": []}
+        self.data = {"dataset_version": "6.0", "documents": []}
         self.domain = urlparse(start_url).netloc
         self.to_visit = set([start_url])
         self.pattern_counter = Counter()
@@ -32,6 +33,7 @@ class WebScraper:
         self.max_patterns = 10000
         self.stop_words = set(stopwords.words('english'))
         self.session = requests.Session()
+        self.content_hashes = set()
 
         nltk.download('punkt', quiet=True)
         nltk.download('stopwords', quiet=True)
@@ -39,9 +41,9 @@ class WebScraper:
     def scrape(self):
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = set()
-            pbar = tqdm(total=self.max_pages, desc="Pages scraped")
+            pbar = tqdm(total=self.max_pages, desc="Pages processed")
             
-            while self.to_visit and len(self.visited_urls) < self.max_pages:
+            while self.to_visit and len(self.data["documents"]) < self.max_pages:
                 while len(futures) < self.max_workers and self.to_visit:
                     url = self.to_visit.pop()
                     if url not in self.visited_urls:
@@ -51,17 +53,20 @@ class WebScraper:
                 if not futures:
                     break
 
-                done, futures = as_completed(futures), set()
-
-                for future in done:
+                for future in as_completed(futures):
                     result = future.result()
                     if result:
                         self.data["documents"].append(result)
                         self._update_patterns(result)
                         pbar.update(1)
+                    else:
+                        # Update progress even if no data was extracted
+                        pbar.update(0)
+                    
+                    # Refresh the progress bar description
+                    pbar.set_description(f"Pages processed: {len(self.visited_urls)}, Extracted: {len(self.data['documents'])}")
 
-                if len(self.visited_urls) % 100 == 0:
-                    tqdm.write(f"Pages visited: {len(self.visited_urls)}, Queue: {len(self.to_visit)}, Patterns: {len(self.pattern_counter)}")
+                futures = set()
 
             pbar.close()
 
@@ -90,6 +95,11 @@ class WebScraper:
         if not main_content:
             return None
 
+        content_hash = hashlib.md5(main_content.encode()).hexdigest()
+        if content_hash in self.content_hashes:
+            return None
+        self.content_hashes.add(content_hash)
+
         return {
             "id": str(uuid.uuid4()),
             "url": url,
@@ -110,13 +120,23 @@ class WebScraper:
         if not content_div:
             return ""
 
+        # Remove unwanted elements
+        for element in content_div.select('table, .mw-editsection, .reference, .error, .noprint, .mbox-small'):
+            element.decompose()
+
         paragraphs = []
         for p in content_div.select('p'):
             text = self._clean_content(p.get_text())
             if len(text.split()) >= 20:  # Only include paragraphs with 20+ words
                 paragraphs.append(text)
 
-        return '\n\n'.join(paragraphs)
+        # Remove list summarizations
+        content = '\n\n'.join(paragraphs)
+        content = re.sub(r'See also.*', '', content, flags=re.DOTALL)
+        content = re.sub(r'References.*', '', content, flags=re.DOTALL)
+        content = re.sub(r'External links.*', '', content, flags=re.DOTALL)
+
+        return content.strip()
 
     def _clean_content(self, content):
         content = re.sub(r'\[\d+\]|\[edit\]', '', content)
@@ -136,7 +156,8 @@ class WebScraper:
         parsed_url = urlparse(url)
         return (parsed_url.netloc == self.domain and
                 url not in self.visited_urls and
-                not re.search(r'\.(jpg|jpeg|png|gif|pdf)$', parsed_url.path, re.I))
+                not re.search(r'\.(jpg|jpeg|png|gif|pdf)$', parsed_url.path, re.I) and
+                not re.search(r':(Talk|User|User_talk|Wikipedia|Wikipedia_talk|File|File_talk|MediaWiki|MediaWiki_talk|Template|Template_talk|Help|Help_talk|Category|Category_talk|Portal|Portal_talk|Book|Book_talk):', parsed_url.path))
 
     def _update_patterns(self, document):
         content = document['main_content']
@@ -162,19 +183,27 @@ class WebScraper:
                         patterns.add(pattern)
         return patterns
 
-    def save_data(self, filename='fast_extraction_training_data.json'):
+    def save_data(self, filename):
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(self.data, f, ensure_ascii=False, indent=2)
-        tqdm.write(f"Data saved to {filename}")
+        print(f"Data saved to {filename}")
+
 
 # Usage
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Scrape Wikipedia data")
+    parser.add_argument("--start_url", type=str, default="https://en.wikipedia.org/wiki/Main_Page", help="Starting URL for scraping")
+    parser.add_argument("--max_pages", type=int, default=5000, help="Maximum number of pages to scrape")
+    parser.add_argument("--output_file", type=str, default="improved_extraction_training_data.json", help="Output file for scraped data")
+    args = parser.parse_args()
+
     start_time = time.time()
-    start_url = "https://en.wikipedia.org/wiki/Main_Page"
-    scraper = WebScraper(start_url, max_pages=5000, max_workers=100, timeout=30)
+    scraper = WebScraper(args.start_url, max_pages=args.max_pages, max_workers=100, timeout=30)
     scraper.scrape()
-    scraper.save_data()
+    scraper.save_data(args.output_file)
     end_time = time.time()
-    print(f"Scraped {len(scraper.data['documents'])} pages in {end_time - start_time:.2f} seconds.")
-    print(f"Data saved to fast_extraction_training_data.json")
+
+    print(f"Processed {len(scraper.visited_urls)} pages, extracted {len(scraper.data['documents'])} documents in {end_time - start_time:.2f} seconds.")
     print(f"Total blacklisted patterns: {len(scraper.blacklisted_patterns)}")
